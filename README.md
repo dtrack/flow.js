@@ -1,7 +1,7 @@
 ## Flow.js [![Build Status](https://travis-ci.org/flowjs/flow.js.png)](https://travis-ci.org/flowjs/flow.js) [![Coverage Status](https://coveralls.io/repos/flowjs/flow.js/badge.png?branch=master)](https://coveralls.io/r/flowjs/flow.js?branch=master)
 
 
-Flow.js is a JavaScript library providing multiple simultaneous, stable and resumable uploads via the HTML5 File API. 
+Flow.js is a JavaScript library providing multiple simultaneous, stable and resumable uploads via the HTML5 File API.
 
 The library is designed to introduce fault-tolerance into the upload of large files through HTTP. This is done by splitting each file into small chunks. Then, whenever the upload of a chunk fails, uploading is retried until the procedure completes. This allows uploads to automatically resume uploading after a network connection is lost either locally or to the server. Additionally, it allows for users to pause, resume and even recover uploads without losing state because only the currently uploading chunks will be aborted, not the entire upload.
 
@@ -22,7 +22,7 @@ it contains development and minified production files in `dist/` folder.
 or use bower:
 
         bower install flow.js#~2
-                
+
 or use git clone
 
         git clone https://github.com/flowjs/flow.js
@@ -32,12 +32,12 @@ or use git clone
 A new `Flow` object is created with information of what and where to post:
 
     var flow = new Flow({
-      target:'/api/photo/redeem-upload-token', 
+      target:'/api/photo/redeem-upload-token',
       query:{upload_token:'my_token'}
     });
     // Flow.js isn't supported, fall back on a different method
     if(!flow.support) location.href = '/some-old-crappy-uploader';
-  
+
 To allow files to be either selected and drag-dropped, you'll assign drop target and a DOM item to be clicked for browsing:
 
     flow.assignBrowse(document.getElementById('browseButton'));
@@ -62,7 +62,7 @@ Most of the magic for Flow.js happens in the user's browser, but files still nee
 To handle the state of upload chunks, a number of extra parameters are sent along with all requests:
 
 * `flowChunkNumber`: The index of the chunk in the current upload. First chunk is `1` (no base-0 counting here).
-* `flowTotalChunks`: The total number of chunks.  
+* `flowTotalChunks`: The total number of chunks.
 * `flowChunkSize`: The general chunk size. Using this value and `flowTotalSize` you can calculate the total number of chunks. Please note that the size of the data received in the HTTP might be lower than `flowChunkSize` of this for the last chunk for a file.
 * `flowTotalSize`: The total file size.
 * `flowIdentifier`: A unique identifier for the file contained in the request.
@@ -94,7 +94,7 @@ After this is done and `testChunks` enabled, an upload can quickly catch up even
 The object is loaded with a configuration options:
 
     var r = new Flow({opt1:'val', ...});
-    
+
 Available configuration options are:
 
 * `target` The target URL for the multipart POST request. This can be a string or a function. If a
@@ -124,6 +124,10 @@ to 0 to handle each progress callback. (Default: `500`)
 and average upload speed wil be equal to current upload speed. For longer file uploads it is
 better set this number to 0.02, because time remaining estimation will be more accurate. This
 parameter must be adjusted together with `progressCallbacksInterval` parameter. (Default 0.1)
+* `initialize`: initialize function to be performed on each file **before** starting the upload. It is passed a flowFile, the flow object, and a next function to be called
+whenever the initialization is complete. The next function accept an optional `error` argument that should be set to true only if there were an error during the custom user defined initialize function. This will cause the file to be in error mode and the user will have to `retry()` it if he wants (causing the file to restart from scratch, having to go through all steps again).
+* `finalize`: finalize function to be performed on each file **after** the upload has completed. It is passed a flowFile, the flow object, and a next function to be called
+whenever the initialization is complete. The next function accept an optional `error` argument that should be set to true only if there were an error during the custom user defined finalize function. This will cause the file to be in error mode and the user will have to `retry()` it if he wants (causing the file to restart from scratch, having to go through all steps again).
 
 
 #### Properties
@@ -165,8 +169,10 @@ parameter must be adjusted together with `progressCallbacksInterval` parameter. 
 
 #### Events
 
-* `.fileSuccess(file, message)` A specific file was completed. First argument `file` is instance of `FlowFile`, second argument `message` contains server response. Response is always a string.
+* `.fileSuccess(file)` A specific file was completed and finalized. Argument `file` is instance of `FlowFile`.
+* `.fileUploadSuccess(file, message)` A specific file was completed but not yet finalized. First argument `file` is instance of `FlowFile`, second argument `message` contains server response. Response is always a string.
 * `.fileProgress(file)` Uploading progressed for a specific file.
+* `.fileInitialized(file)` A specific file completed its initialization step. Argument `file` is instance of `FlowFile`.
 * `.fileAdded(file, event)` This event is used for file validation. To reject this file return false.
 This event is also called before file is added to upload queue,
 this means that calling `flow.upload()` function will not start current file upload.
@@ -206,8 +212,20 @@ FlowFile constructor can be accessed in `Flow.FlowFile`.
 * `.cancel()` Abort uploading the file and delete it from the list of files to upload.
 * `.retry()` Retry uploading the file.
 * `.bootstrap()` Rebuild the state of a `FlowFile` object, including reassigning chunks and XMLHttpRequest instances.
+* `.status()` Indicates the status of the file. Can be any of the following:
+  * `paused`: file is paused
+  * `error`: there was an error while treating the file
+  * `ready`: file is ready to be processed (has not gone through initialization yet)
+  * `initializing`: file is initializing
+  * `pending`: file is waiting to start uploading (has already completed initialization)
+  * `uploading`: file is uploading
+  * `uploaded`: file is done uploading
+  * `pendingFinalization`: file is waiting to start its finalization step
+  * `finalizing`: file is in its finalization step
+  * `success`: file was successfully uploaded and finalized
 * `.isUploading()` Returns a boolean indicating whether file chunks is uploading.
-* `.isComplete()` Returns a boolean indicating whether the file has completed uploading and received a server response.
+* `.isFullyUploaded()` Returns a boolean indicating whether the file has completed uploading and received a server response.
+* `.isComplete()` Returns a boolean indicating whether the file has fully uploaded and completed finalization.
 * `.sizeUploaded()` Returns size uploaded in bytes.
 * `.timeRemaining()` Returns remaining time to finish upload file in seconds. Accuracy is based on average speed. If speed is zero, time remaining will be equal to positive infinity `Number.POSITIVE_INFINITY`
 * `.getExtension()` Returns file extension in lowercase.

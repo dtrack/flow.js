@@ -104,40 +104,42 @@ describe('upload file', function() {
     expect(file.chunks.length).toBe(2);
     flow.upload();
     // Sync events
-    expect(events.length).toBe(4);
+    expect(events.length).toBe(5);
     expect(events[0]).toBe('fileAdded');
     expect(events[1]).toBe('filesAdded');
     expect(events[2]).toBe('filesSubmitted');
     expect(events[3]).toBe('uploadStart');
+    expect(events[4]).toBe('fileInitialized');
     // Async
     requests[0].respond(200);
-    expect(events.length).toBe(6);
-    expect(events[4]).toBe('fileProgress');
-    expect(events[5]).toBe('progress');
+    expect(events.length).toBe(7);
+    expect(events[5]).toBe('fileProgress');
+    expect(events[6]).toBe('progress');
     requests[1].respond(400);
-    expect(events.length).toBe(6);
+    expect(events.length).toBe(7);
     requests[2].progress(5, 10, true);
-    expect(events.length).toBe(8);
-    expect(events[6]).toBe('fileProgress');
-    expect(events[7]).toBe('progress');
+    expect(events.length).toBe(9);
+    expect(events[7]).toBe('fileProgress');
+    expect(events[8]).toBe('progress');
     requests[2].respond(200);
-    expect(events.length).toBe(11);
-    expect(events[8]).toBe('fileProgress');
-    expect(events[9]).toBe('progress');
-    expect(events[10]).toBe('fileSuccess');
-
-    jasmine.Clock.tick(1);
-    expect(events.length).toBe(12);
-    expect(events[11]).toBe('complete');
-
-    flow.upload();
     expect(events.length).toBe(13);
-    expect(events[12]).toBe('uploadStart');
+    expect(events[9]).toBe('fileProgress');
+    expect(events[10]).toBe('progress');
+    expect(events[11]).toBe('fileUploadSuccess');
+    expect(events[12]).toBe('fileSuccess');
 
-    // complete event is always asynchronous
     jasmine.Clock.tick(1);
     expect(events.length).toBe(14);
     expect(events[13]).toBe('complete');
+
+    flow.upload();
+    expect(events.length).toBe(15);
+    expect(events[14]).toBe('uploadStart');
+
+    // complete event is always asynchronous
+    jasmine.Clock.tick(1);
+    expect(events.length).toBe(16);
+    expect(events[15]).toBe('complete');
   });
 
   it('should pause and resume file', function () {
@@ -174,7 +176,9 @@ describe('upload file', function() {
     expect(requests.length).toBe(6);
     expect(files[0].isUploading()).toBeTruthy();
     expect(files[1].isUploading()).toBeFalsy();
-    expect(files[1].isComplete()).toBeTruthy();
+    // file 1 fully uploaded, will be complete after file 0 has completed since
+    // file 0 stuff are picked up first in loop
+    expect(files[1].isFullyUploaded()).toBeTruthy();
     requests[4].respond(200);
     expect(requests.length).toBe(7);
     requests[5].respond(200);
@@ -183,7 +187,6 @@ describe('upload file', function() {
     expect(requests.length).toBe(8);
     requests[7].respond(200);
     expect(requests.length).toBe(8);
-    // Upload finished
     expect(files[0].isUploading()).toBeFalsy();
     expect(files[0].isComplete()).toBeTruthy();
     expect(files[0].progress()).toBe(1);
@@ -265,7 +268,7 @@ describe('upload file', function() {
     expect(retry.callCount).toBe(2);
 
     expect(file.error).toBeTruthy();
-    expect(file.isComplete()).toBeTruthy();
+    expect(file.isFullyUploaded()).toBeTruthy();
     expect(file.isUploading()).toBeFalsy();
     expect(file.progress()).toBe(1);
   });
@@ -280,7 +283,7 @@ describe('upload file', function() {
     var success = jasmine.createSpy('success');
     var retry = jasmine.createSpy('retry');
     flow.on('fileError', error);
-    flow.on('fileSuccess', success);
+    flow.on('fileUploadSuccess', success);
     flow.on('fileRetry', retry);
 
     flow.addFile(new Blob(['12']));
@@ -333,7 +336,7 @@ describe('upload file', function() {
     var error = jasmine.createSpy('error');
     var success = jasmine.createSpy('success');
     flow.on('fileError', error);
-    flow.on('fileSuccess', success);
+    flow.on('fileUploadSuccess', success);
 
     flow.addFile(new Blob([]));
     var file = flow.files[0];
@@ -373,7 +376,7 @@ describe('upload file', function() {
     var error = jasmine.createSpy('error');
     var success = jasmine.createSpy('success');
     flow.on('fileError', error);
-    flow.on('fileSuccess', success);
+    flow.on('fileUploadSuccess', success);
     flow.opts.preprocess = preprocess;
     flow.addFile(new Blob(['abc']));
     var file = flow.files[0];
@@ -483,5 +486,112 @@ describe('upload file', function() {
     expect(fileThird.averageSpeed).toBe(0);
     expect(fileThird.timeRemaining()).toBe(0);
     expect(flow.timeRemaining()).toBe(0);
+  });
+
+  it('should wait for initialize and finalize step to be done', function () {
+    var clock = sinon.useFakeTimers();
+    flow.opts.initialize = function (file, flowObj, next) {
+      setTimeout(function () {
+        file.initialized = true;
+        next();
+      }, 10);
+    };
+    flow.opts.finalize = function (file, flowObj, next) {
+      setTimeout(function () {
+        file.finalized = true;
+        next();
+      }, 10);
+    };
+    flow.opts.simultaneousUploads = 1;
+    flow.addFile(new Blob(['123']));
+    var file = flow.files[0];
+    expect(file.status()).toBe('ready');
+    expect(file.initialized).toBeUndefined();
+    flow.upload();
+    expect(file.status()).toBe('initializing');
+    expect(file.initialized).toBeUndefined();
+    clock.tick(10);
+    expect(file.status()).toBe('uploading');
+    expect(file.initialized).toBeTruthy();
+    expect(requests.length).toBe(1);
+    requests[0].respond(200);
+    // the only way status could be pendingFinalization is if another file was
+    // taking the simultaneousUploads slots
+    expect(file.status()).toBe('finalizing');
+    expect(file.isFullyUploaded()).toBeTruthy();
+    expect(file.finalized).toBeUndefined();
+    clock.tick(10);
+    expect(file.isComplete()).toBeTruthy();
+    expect(file.status()).toBe('success');
+    expect(file.finalized).toBeTruthy();
+  });
+  it('should properly set file into error mode after failed init or finalize', function () {
+    var clock = sinon.useFakeTimers();
+    var count = 0;
+    flow.opts.initialize = function (file, flowObj, next) {
+      setTimeout(function () {
+        if (count++ === 0) {
+          file.initialized = 'error';
+          next(true);
+        }
+        else {
+          file.initialized = 'success';
+          next();
+        }
+      }, 10);
+    };
+    flow.opts.finalize = function (file, flowObj, next) {
+      setTimeout(function () {
+        if (count++ === 2) {
+          file.finalized = 'error';
+          next(true);
+        }
+        else {
+          file.finalized = 'success';
+          next();
+        }
+      }, 10);
+    };
+    flow.opts.simultaneousUploads = 1;
+    flow.addFile(new Blob(['123']));
+    var file = flow.files[0];
+    expect(file.status()).toBe('ready');
+    expect(file.initialized).toBeUndefined();
+    flow.upload();
+    expect(file.status()).toBe('initializing');
+    expect(file.initialized).toBeUndefined();
+    clock.tick(10);
+    expect(file.status()).toBe('error');
+    expect(file.initialized).toBe('error');
+    expect(requests.length).toBe(0);
+
+    file.retry();
+    expect(file.status()).toBe('initializing');
+    clock.tick(10);
+    expect(file.status()).toBe('uploading');
+    expect(file.initialized).toBe('success');
+    requests[0].respond(200);
+    // the only way status could be pendingFinalization is if another file was
+    // taking the simultaneousUploads slots
+    expect(file.status()).toBe('finalizing');
+    expect(file.isFullyUploaded()).toBeTruthy();
+    expect(file.finalized).toBeUndefined();
+    clock.tick(10);
+    expect(file.isComplete()).toBeFalsy();
+    expect(file.status()).toBe('error');
+    expect(file.finalized).toBe('error');
+
+    // last retry, should work
+    file.retry();
+    expect(file.status()).toBe('initializing');
+    clock.tick(10);
+    expect(file.status()).toBe('uploading');
+    requests[1].respond(200);
+    expect(file.status()).toBe('finalizing');
+    expect(file.isFullyUploaded()).toBeTruthy();
+    clock.tick(10);
+    expect(file.status()).toBe('success');
+    expect(file.isComplete()).toBeTruthy();
+    expect(file.finalized).toBe('success');
   });
 });
