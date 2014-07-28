@@ -82,7 +82,9 @@
       maxChunkRetries: 0,
       chunkRetryInterval: null,
       permanentErrors: [404, 415, 500, 501],
-      onDropStopPropagation: false
+      onDropStopPropagation: false,
+      initialize: null,
+      finalize: null
     };
 
     /**
@@ -269,58 +271,43 @@
     },
 
     /**
-     * Upload next chunk from the queue
+     * Identifies next action to be performed from the queue
      * @function
      * @returns {boolean}
      * @private
      */
-    uploadNextChunk: function (preventEvents) {
-      // In some cases (such as videos) it's really handy to upload the first
-      // and last chunk of a file quickly; this let's the server check the file's
-      // metadata and determine if there's even a point in continuing.
+    performNextAction: function (preventEvents) {
+      var $ = this;
       var found = false;
-      if (this.opts.prioritizeFirstAndLastChunk) {
-        each(this.files, function (file) {
-          if (!file.paused && file.chunks.length &&
-            file.chunks[0].status() === 'pending' &&
-            file.chunks[0].preprocessState === 0) {
-            file.chunks[0].send();
-            found = true;
-            return false;
-          }
-          if (!file.paused && file.chunks.length > 1 &&
-            file.chunks[file.chunks.length - 1].status() === 'pending' &&
-            file.chunks[0].preprocessState === 0) {
-            file.chunks[file.chunks.length - 1].send();
-            found = true;
-            return false;
-          }
-        });
-        if (found) {
-          return found;
-        }
-      }
-
-      // Now, simply look for the next, best thing to upload
       each(this.files, function (file) {
-        if (!file.paused) {
-          each(file.chunks, function (chunk) {
-            if (chunk.status() === 'pending' && chunk.preprocessState === 0) {
-              chunk.send();
-              found = true;
-              return false;
-            }
-          });
+        var fileStatus = file.status();
+        if (fileStatus === 'ready') {
+          file.initialize($);
+          found = true;
+          return false;
         }
-        if (found) {
+        else if (fileStatus === 'pending' || fileStatus === 'uploading') {
+          $.uploadNextChunk(file);
+          found = true;
+          return false;
+        }
+        else if (fileStatus === 'uploaded') {
+          file.next();
+          found = true;
+          return false;
+        }
+        else if (fileStatus === 'pendingFinalization') {
+          file.finalize($);
+          found = true;
           return false;
         }
       });
+
       if (found) {
         return true;
       }
 
-      // The are no more outstanding chunks to upload, check is everything is done
+      // The is no more work to do, check if everything is done
       var outstanding = false;
       each(this.files, function (file) {
         if (!file.isComplete()) {
@@ -335,8 +322,52 @@
         }, this);
       }
       return false;
+
     },
 
+    /**
+     * Upload next chunk for the file
+     * @function
+     * @returns {boolean}
+     * @private
+     */
+    uploadNextChunk: function (file, preventEvents) {
+      // In some cases (such as videos) it's really handy to upload the first
+      // and last chunk of a file quickly; this let's the server check the file's
+      // metadata and determine if there's even a point in continuing.
+      if (this.opts.prioritizeFirstAndLastChunk) {
+        if (!file.paused && file.chunks.length &&
+          file.chunks[0].status() === 'pending' &&
+          file.chunks[0].preprocessState === 0) {
+          file.chunks[0].send();
+          return true;
+        }
+        if (!file.paused && file.chunks.length > 1 &&
+          file.chunks[file.chunks.length - 1].status() === 'pending' &&
+          file.chunks[0].preprocessState === 0) {
+          file.chunks[file.chunks.length - 1].send();
+          return true;
+        }
+      }
+
+      // Now, simply look for the next, best thing to upload
+      var found = false;
+      if (!file.paused) {
+        each(file.chunks, function (chunk) {
+          if (chunk.status() === 'pending' && chunk.preprocessState === 0) {
+            chunk.send();
+            found = true;
+            return false;
+          }
+        });
+      }
+      if (found) {
+        return true;
+      }
+
+      // no more chunks to upload for this file
+      return false;
+    },
 
     /**
      * Assign a browse action to one or more DOM nodes.
@@ -453,17 +484,31 @@
       var should = true;
       var simultaneousUploads = this.opts.simultaneousUploads;
       each(this.files, function (file) {
-        each(file.chunks, function(chunk) {
-          if (chunk.status() === 'uploading') {
-            num++;
-            if (num >= simultaneousUploads) {
-              should = false;
-              return false;
+        var fileStatus = file.status();
+        if (fileStatus === 'uploading') {
+          // count how many chunks are uploading
+          each(file.chunks, function(chunk) {
+            if (chunk.status() === 'uploading') {
+              num++;
+              // stop looping as soon as we reach max simultaneous uploads
+              if (num >= simultaneousUploads) {
+                return false;
+              }
             }
-          }
-        });
+          });
+        }
+        else if (['ready', 'paused', 'error', 'success', 'pending', 'pendingFinalization', 'uploaded'].indexOf(fileStatus) === -1) {
+          num ++;
+        }
+
+        // stop looping as soon as we reach max simultaneous uploads and return
+        if (num >= simultaneousUploads) {
+          should = false;
+          return false;
+        }
+
       });
-      // if should is true then return uploading chunks's length
+      // if should is true then return uploading files's length
       return should && num;
     },
 
@@ -481,7 +526,7 @@
       this.fire('uploadStart');
       var started = false;
       for (var num = 1; num <= this.opts.simultaneousUploads - ret; num++) {
-        started = this.uploadNextChunk(true) || started;
+        started = this.performNextAction(true) || started;
       }
       if (!started) {
         async(function () {
@@ -760,10 +805,145 @@
      */
     this._prevProgress = 0;
 
+
+    /**
+     * Indicates if the initialize step has completed
+     * @type {boolean}
+     * @private
+     */
+    this._initializeDone = false;
+    this._initializeStarted = false;
+
+    /**
+     * Indicates if the finalize upload step has completed
+     * @type {boolean}
+     * @private
+     */
+    this._uploadDone = false;
+
+    /**
+     * Indicates if the finalize upload step has completed
+     * @type {boolean}
+     * @private
+     */
+    this._finalizeStarted = false;
+    this._finalizeDone = false;
+
+
     this.bootstrap();
+
   }
 
   FlowFile.prototype = {
+    /**
+     * For internal usage only (the user facing initialize and finalize are
+     * passed via options).
+     * Initialization step before upload: anything that needs to be done before
+     * upload starts. This may be useful for uploading to third party services
+     * that need the user to compile a signature to be send in the query
+     * along the file.
+     * This is a no-op if user hasn't submitted an initialize step in the opts.
+     * @function
+     * @param {Flow} flowObj
+     */
+    initialize: function (flowObj) {
+      var $ = this;
+      var _callNext = function (error) {
+        return $.next.call($, error);
+      };
+      this._initializeStarted = true;
+      if (this.flowObj.opts.initialize) {
+        this.flowObj.opts.initialize(this, flowObj, _callNext);
+      }
+      else {
+        this.next();
+      }
+    },
+    /*
+    * For internal usage only (the user facing initialize and finalize are
+    * passed via options).
+    * Finalization step after the file after it has fully uploaded.
+    * This is a no-op if the user hasn't submitted a finalize step in the opts.
+    * @function
+    * @param {Flow} flowObj
+    */
+    finalize: function (flowObj) {
+      var $ = this;
+      var _callNext = function (error) {
+        return $.next.call($, error);
+      };
+      this._finalizeStarted = true;
+      if (this.flowObj.opts.finalize) {
+        this.flowObj.opts.finalize(this, flowObj, _callNext);
+      }
+      else {
+        this.next();
+      }
+    },
+    /*
+    * Transitions the file to the next next step.
+    * File can either be in the initialization step, uploading step or,
+    * finalization step.
+    * @function
+    */
+    next: function (error) {
+      if (error) {
+        this.error = true;
+      }
+      if (!this._initializeDone) {
+        this._initializeDone = true;
+        this.flowObj.performNextAction();
+        this.flowObj.fire('fileInitialized', this);
+      }
+      else if (!this._uploadDone) {
+        this._uploadDone = true;
+        this.flowObj.performNextAction();
+      }
+      else if (!this._finalizeDone) {
+        this._finalizeDone = true;
+        this.flowObj.fire('fileSuccess', this);
+        this.flowObj.performNextAction();
+      }
+    },
+
+    /**
+     * Indicates the current status of the file
+     * @function
+     * @returns {string} 'paused', 'error', 'ready', 'initializing', 'pending',
+     *    'uploading', 'uploaded', 'pendingFinalization', 'finalizing' or
+     *    'success'
+     */
+    status: function () {
+      // special statuses
+      if (this.paused) {
+        return 'paused';
+      }
+      else if (this.error) {
+        return 'error';
+      }
+      // statuses along the flow
+      else if (!this._initializeDone) {
+        return this._initializeStarted ? 'initializing': 'ready';
+      }
+      else if (!this._uploadDone) {
+        if (this.isUploading()) {
+          return 'uploading';
+        }
+        else if (this.isFullyUploaded()) {
+          return 'uploaded';
+        }
+        else {
+          return 'pending';
+        }
+      }
+      else if (!this._finalizeDone) {
+        return !this._finalizeStarted ? 'pendingFinalization': 'finalizing';
+      }
+      else {
+        return 'success';
+      }
+    },
+
     /**
      * Update speed parameters
      * @link http://stackoverflow.com/questions/2779600/how-to-estimate-download-time-remaining-accurately
@@ -815,10 +995,10 @@
           this.flowObj.fire('fileProgress', this);
           this.flowObj.fire('progress');
           this._lastProgressCallback = Date.now();
-          if (this.isComplete()) {
+          if (this.isFullyUploaded()) {
             this.currentSpeed = 0;
             this.averageSpeed = 0;
-            this.flowObj.fire('fileSuccess', this, message);
+            this.flowObj.fire('fileUploadSuccess', this, message);
           }
           break;
         case 'retry':
@@ -850,6 +1030,10 @@
      * @function
      */
     abort: function (reset) {
+      var pauseValue = this.paused;
+      // we make paused to true so that performNextAction does not pick up
+      // anything on the aborted file
+      this.paused = true;
       this.currentSpeed = 0;
       this.averageSpeed = 0;
       var chunks = this.chunks;
@@ -859,9 +1043,10 @@
       each(chunks, function (c) {
         if (c.status() === 'uploading') {
           c.abort();
-          this.flowObj.uploadNextChunk();
+          this.flowObj.performNextAction();
         }
       }, this);
+      this.paused = pauseValue;
     },
 
     /**
@@ -886,6 +1071,11 @@
      * @function
      */
     bootstrap: function () {
+      this._initializeStarted = false;
+      this._initializeDone = false;
+      this._uploadDone = false;
+      this._finalizeStarted = false;
+      this._finalizeDone = false;
       this.abort(true);
       this.error = false;
       // Rebuild stack of chunks from file
@@ -947,7 +1137,7 @@
      * @function
      * @returns {boolean}
      */
-    isComplete: function () {
+    isFullyUploaded: function () {
       var outstanding = false;
       each(this.chunks, function (chunk) {
         var status = chunk.status();
@@ -957,6 +1147,15 @@
         }
       });
       return !outstanding;
+    },
+
+    /**
+     * Indicates if file is fully uploaded and finalize step has completed
+     * @function
+     * @returns {boolean}
+     */
+    isComplete: function () {
+      return this.status() === 'success';
     },
 
     /**
@@ -1142,7 +1341,7 @@
       if (status === 'success') {
         $.tested = true;
         $.fileObj.chunkEvent(status, $.message());
-        $.flowObj.uploadNextChunk();
+        $.flowObj.performNextAction();
       } else if (!$.fileObj.paused) {// Error might be caused by file pause method
         $.tested = true;
         $.send();
@@ -1157,7 +1356,7 @@
       var status = $.status();
       if (status === 'success' || status === 'error') {
         $.fileObj.chunkEvent(status, $.message());
-        $.flowObj.uploadNextChunk();
+        $.flowObj.performNextAction();
       } else {
         $.fileObj.chunkEvent('retry', $.message());
         $.pendingRetry = true;
