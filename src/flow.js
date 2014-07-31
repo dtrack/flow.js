@@ -287,9 +287,10 @@
           return false;
         }
         else if (fileStatus === 'pending' || fileStatus === 'uploading') {
-          $.uploadNextChunk(file);
-          found = true;
-          return false;
+          found = $.uploadNextChunk(file);
+          if (found) {
+            return false;
+          }
         }
         else if (fileStatus === 'uploaded') {
           file.next();
@@ -701,11 +702,36 @@
         return 0;
       }
       return Math.floor(sizeDelta / averageSpeed);
+    },
+
+    _aggregateSpeed: function (speedType) {
+      var res = 0;
+      each(this.files, function (file) {
+        if (!file.paused && !file.error) {
+          res += file[speedType];
+        }
+      });
+      return res;
+    },
+
+    /**
+     * Returns average speed aggregated from all files currently uploading
+     * @function
+     * @returns {number}
+     */
+    averageSpeed: function () {
+      return this._aggregateSpeed('averageSpeed');
+    },
+
+    /**
+     * Returns current speed aggregated from all files currently uploading
+     * @function
+     * @returns {number}
+     */
+    currentSpeed: function () {
+      return this._aggregateSpeed('currentSpeed');
     }
   };
-
-
-
 
 
 

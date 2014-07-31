@@ -488,6 +488,48 @@ describe('upload file', function() {
     expect(flow.timeRemaining()).toBe(0);
   });
 
+  it('should correctly aggregate speed over files', function () {
+    var clock = sinon.useFakeTimers();
+    flow.opts.testChunks = false;
+    flow.opts.speedSmoothingFactor = 0.5;
+    flow.opts.simultaneousUploads = 3;
+
+    flow.addFile(new Blob(['22']));
+    flow.addFile(new Blob(['333']));
+    flow.addFile(new Blob(['4444']));
+
+    var fileFirst = flow.files[0];
+    var fileSecond = flow.files[1];
+    var fileThird = flow.files[2];
+
+
+    expect(fileFirst.currentSpeed).toBe(0);
+    expect(fileFirst.averageSpeed).toBe(0);
+    expect(fileSecond.currentSpeed).toBe(0);
+    expect(fileSecond.averageSpeed).toBe(0);
+    expect(fileThird.currentSpeed).toBe(0);
+    expect(fileThird.averageSpeed).toBe(0);
+    expect(flow.currentSpeed()).toBe(0);
+    expect(flow.averageSpeed()).toBe(0);
+
+    flow.upload();
+
+    clock.tick(1000);
+    requests[0].progress(1, 2, true);
+    requests[1].progress(2, 3, true);
+    requests[2].progress(2, 4, true);
+
+    expect(fileFirst.currentSpeed).toBe(1);
+    expect(fileFirst.averageSpeed).toBe(0.5);
+    expect(fileSecond.currentSpeed).toBe(2);
+    expect(fileSecond.averageSpeed).toBe(1);
+    expect(fileThird.currentSpeed).toBe(2);
+    expect(fileThird.averageSpeed).toBe(1);
+    expect(flow.currentSpeed()).toBe(2 + 2 + 1);
+    expect(flow.averageSpeed()).toBe(0.5 + 1 + 1);
+
+  });
+
   it('should wait for initialize and finalize step to be done', function () {
     var clock = sinon.useFakeTimers();
     flow.opts.initialize = function (file, flowObj, next) {
